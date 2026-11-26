@@ -22,7 +22,7 @@
       justify-content: space-between;
       align-items: center;
       margin-bottom: 10px;
-      font-size: 18px;
+      font-size: 16px;
       font-weight: bold;
     }
     #muteBtn {
@@ -32,7 +32,7 @@
       border-radius: 6px;
       padding: 4px 10px;
       cursor: pointer;
-      font-size: 14px;
+      font-size: 13px;
     }
     #muteBtn:hover { background: #1a4b8c; }
     canvas {
@@ -42,12 +42,14 @@
       cursor: crosshair;
     }
     .warning { color: #ff4d4d; }
+    .level-badge { color: #4dff88; }
   </style>
 </head>
 <body>
   <div id="ui">
+    <span class="level-badge">Fase <span id="level">1</span></span>
     <span>Pontos: <span id="score">0</span></span>
-    <span>Descida em: <span id="shotsLeft">5</span> tiros</span>
+    <span>Descida: <span id="shotsLeft">5</span></span>
     <button id="muteBtn">🔊 Som: ON</button>
   </div>
   <canvas id="game" width="480" height="640"></canvas>
@@ -55,6 +57,7 @@
 <script>
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
+const levelEl = document.getElementById('level');
 const scoreEl = document.getElementById('score');
 const shotsLeftEl = document.getElementById('shotsLeft');
 const muteBtn = document.getElementById('muteBtn');
@@ -113,7 +116,6 @@ const SFX = {
     playTone(150, 'sine', 0.09, 0, 0.18, 90);
   },
   pop(count) {
-    // Toca uma bolha estourando em sequência com tom crescente
     const notes = Math.min(count, 8);
     for (let i = 0; i < notes; i++) {
       const freq = 420 + i * 75;
@@ -121,7 +123,6 @@ const SFX = {
     }
   },
   drop(count) {
-    // Cascata aguda para bolhas soltas caindo
     const notes = Math.min(count, 6);
     for (let i = 0; i < notes; i++) {
       playTone(700 + i * 110, 'triangle', 0.14, 0.15 + i * 0.05, 0.12, 350);
@@ -129,6 +130,12 @@ const SFX = {
   },
   ceilingDown() {
     playTone(140, 'sawtooth', 0.22, 0, 0.14, 75);
+  },
+  levelWin() {
+    const notes = [523.25, 659.25, 783.99, 1046.5];
+    notes.forEach((freq, i) => {
+      playTone(freq, 'triangle', 0.22, i * 0.12, 0.18);
+    });
   },
   gameOver() {
     const notes = [330, 294, 262, 196];
@@ -145,8 +152,7 @@ const DANGER_ROW = ROWS - 2;
 const RADIUS = 20;
 const DIAMETER = RADIUS * 2;
 const ROW_HEIGHT = RADIUS * Math.sqrt(3);
-const COLORS = ['#ff4d4d', '#4dff88', '#4da6ff', '#ffd11a', '#b84dff'];
-const MAX_MISSES = 5;
+const ALL_COLORS = ['#ff4d4d', '#4dff88', '#4da6ff', '#ffd11a', '#b84dff', '#ff884d'];
 
 const LEFT_WALL = RADIUS + 20;
 const RIGHT_WALL = canvas.width - RADIUS - 20;
@@ -154,16 +160,43 @@ const TOP_WALL = RADIUS + 10;
 
 let grid = [];
 let ceilingParity = 0;
+let level = 1;
 let score = 0;
 let misses = 0;
-let gameOver = false;
+let maxMisses = 5;
+let activeColors = [];
+let gameState = 'playing'; // 'playing' | 'levelClear' | 'gameOver'
 let aimAngle = -Math.PI / 2;
 let bullet = null;
-let currentColor = randomColor();
-let nextColor = randomColor();
+let currentColor = null;
+let nextColor = null;
 
-function randomColor() {
-  return COLORS[Math.floor(Math.random() * COLORS.length)];
+// Define parâmetros de dificuldade baseados na fase atual
+function getLevelConfig(lvl) {
+  const colorCount = Math.min(4 + Math.floor((lvl - 1) / 1), ALL_COLORS.length);
+  const allowedMisses = Math.max(3, 5 - Math.floor((lvl - 1) / 2));
+  const initialRows = Math.min(7, 5 + Math.floor((lvl - 1) / 3));
+  return {
+    colors: ALL_COLORS.slice(0, colorCount),
+    maxMisses: allowedMisses,
+    initialRows
+  };
+}
+
+function randomBoardColor() {
+  return activeColors[Math.floor(Math.random() * activeColors.length)];
+}
+
+// Sorteia apenas entre as cores que ainda existem na grade (ou das ativas se vazia)
+function randomShooterColor() {
+  const present = new Set();
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (grid[r][c]) present.add(grid[r][c]);
+    }
+  }
+  const pool = present.size > 0 ? Array.from(present) : activeColors;
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 function isRowShifted(r) {
@@ -171,25 +204,34 @@ function isRowShifted(r) {
 }
 
 function updateUI() {
+  levelEl.textContent = level;
   scoreEl.textContent = score;
-  const remaining = MAX_MISSES - misses;
+  const remaining = maxMisses - misses;
   shotsLeftEl.textContent = remaining;
   shotsLeftEl.className = remaining <= 2 ? 'warning' : '';
 }
 
-function initGrid() {
+function startLevel(targetLevel, resetScore = false) {
+  level = targetLevel;
+  if (resetScore) score = 0;
+
+  const config = getLevelConfig(level);
+  activeColors = config.colors;
+  maxMisses = config.maxMisses;
+
   ceilingParity = 0;
+  misses = 0;
+  gameState = 'playing';
+  bullet = null;
+
   grid = Array.from({ length: ROWS }, (_, r) =>
     Array.from({ length: COLS - (isRowShifted(r) ? 1 : 0) }, (_, c) =>
-      r < 5 ? randomColor() : null
+      r < config.initialRows ? randomBoardColor() : null
     )
   );
-  score = 0;
-  misses = 0;
-  gameOver = false;
-  bullet = null;
-  currentColor = randomColor();
-  nextColor = randomColor();
+
+  currentColor = randomShooterColor();
+  nextColor = randomShooterColor();
   updateUI();
 }
 
@@ -219,18 +261,30 @@ function pushCeilingDown() {
   }
 
   const newTopLength = COLS - (isRowShifted(0) ? 1 : 0);
-  grid[0] = Array.from({ length: newTopLength }, () => randomColor());
+  grid[0] = Array.from({ length: newTopLength }, () => randomBoardColor());
 
   SFX.ceilingDown();
   dropFloatingBubbles();
+}
+
+function checkWin() {
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (grid[r][c] !== null) return false;
+    }
+  }
+  gameState = 'levelClear';
+  score += level * 250; // Bônus de conclusão de fase
+  SFX.levelWin();
+  return true;
 }
 
 function checkGameOver() {
   for (let r = DANGER_ROW; r < ROWS; r++) {
     for (let c = 0; c < grid[r].length; c++) {
       if (grid[r][c] !== null) {
-        if (!gameOver) {
-          gameOver = true;
+        if (gameState === 'playing') {
+          gameState = 'gameOver';
           SFX.gameOver();
         }
         return;
@@ -260,21 +314,30 @@ function snapBullet() {
     grid[bestCell.r][bestCell.c] = bullet.color;
     const popped = resolveMatches(bestCell.r, bestCell.c);
 
-    if (!popped) {
+    if (popped) {
+      checkWin();
+    } else {
       SFX.snap();
       misses++;
-      if (misses >= MAX_MISSES) {
+      if (misses >= maxMisses) {
         pushCeilingDown();
         misses = 0;
       }
     }
-    checkGameOver();
+
+    if (gameState === 'playing') {
+      checkGameOver();
+    }
     updateUI();
   }
 
   bullet = null;
-  currentColor = nextColor;
-  nextColor = randomColor();
+  if (gameState === 'playing') {
+    // Garante que a munição no canhão ainda exista no tabuleiro
+    const present = new Set(grid.flat().filter(Boolean));
+    currentColor = present.has(nextColor) ? nextColor : randomShooterColor();
+    nextColor = randomShooterColor();
+  }
 }
 
 function resolveMatches(startR, startC) {
@@ -403,7 +466,7 @@ function drawAimLine(startX, startY) {
 }
 
 canvas.addEventListener('mousemove', (e) => {
-  if (gameOver) return;
+  if (gameState !== 'playing') return;
   const rect = canvas.getBoundingClientRect();
   const mx = e.clientX - rect.left;
   const my = e.clientY - rect.top;
@@ -413,10 +476,17 @@ canvas.addEventListener('mousemove', (e) => {
 
 canvas.addEventListener('click', () => {
   initAudio();
-  if (gameOver) {
-    initGrid();
+
+  if (gameState === 'gameOver') {
+    startLevel(1, true); // Volta para a Fase 1 zerando pontos
     return;
   }
+
+  if (gameState === 'levelClear') {
+    startLevel(level + 1, false); // Avança para a próxima fase mantendo pontos
+    return;
+  }
+
   if (bullet) return;
 
   SFX.shoot();
@@ -431,7 +501,7 @@ canvas.addEventListener('click', () => {
 });
 
 function update() {
-  if (gameOver || !bullet) return;
+  if (gameState !== 'playing' || !bullet) return;
 
   const subSteps = 4;
   const stepVx = bullet.vx / subSteps;
@@ -469,6 +539,30 @@ function drawBubble(x, y, color) {
   ctx.stroke();
 }
 
+function drawOverlay(title, titleColor, subtitle, detail, actionText) {
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.88)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = titleColor;
+  ctx.font = 'bold 40px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 45);
+
+  ctx.fillStyle = '#fff';
+  ctx.font = '20px sans-serif';
+  ctx.fillText(subtitle, canvas.width / 2, canvas.height / 2 + 5);
+
+  if (detail) {
+    ctx.fillStyle = '#ffd11a';
+    ctx.font = '16px sans-serif';
+    ctx.fillText(detail, canvas.width / 2, canvas.height / 2 + 40);
+  }
+
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '16px sans-serif';
+  ctx.fillText(actionText, canvas.width / 2, canvas.height / 2 + 85);
+}
+
 function draw() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -498,7 +592,7 @@ function draw() {
   const sx = canvas.width / 2;
   const sy = canvas.height - 40;
 
-  if (!gameOver && !bullet) {
+  if (gameState === 'playing' && !bullet) {
     drawAimLine(sx, sy);
   }
 
@@ -507,29 +601,31 @@ function draw() {
 
   if (bullet) drawBubble(bullet.x, bullet.y, bullet.color);
 
-  if (gameOver) {
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    ctx.fillStyle = '#ff4d4d';
-    ctx.font = 'bold 42px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('FIM DE JOGO', canvas.width / 2, canvas.height / 2 - 20);
-
-    ctx.fillStyle = '#fff';
-    ctx.font = '20px sans-serif';
-    ctx.fillText(`Pontuação Final: ${score}`, canvas.width / 2, canvas.height / 2 + 25);
-
-    ctx.fillStyle = '#94a3b8';
-    ctx.font = '16px sans-serif';
-    ctx.fillText('Clique na tela para jogar novamente', canvas.width / 2, canvas.height / 2 + 65);
+  // Telas de transição
+  if (gameState === 'levelClear') {
+    const nextCfg = getLevelConfig(level + 1);
+    drawOverlay(
+      `FASE ${level} CONCLUÍDA!`,
+      '#4dff88',
+      `Pontuação Total: ${score} (+${level * 250} bônus)`,
+      `Próxima fase: ${nextCfg.colors.length} cores | Descida a cada ${nextCfg.maxMisses} erros`,
+      'Clique na tela para iniciar a próxima fase'
+    );
+  } else if (gameState === 'gameOver') {
+    drawOverlay(
+      'FIM DE JOGO',
+      '#ff4d4d',
+      `Você chegou até a Fase ${level}`,
+      `Pontuação Final: ${score}`,
+      'Clique na tela para reiniciar da Fase 1'
+    );
   }
 
   update();
   requestAnimationFrame(draw);
 }
 
-initGrid();
+startLevel(1, true);
 draw();
 </script>
 </body>
