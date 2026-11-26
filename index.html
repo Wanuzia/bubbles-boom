@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Boom Bolhas</title>
+  <style>
+    body {
+      margin: 0;
+      background: #1a1a2e;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      color: #fff;
+      font-family: sans-serif;
+      user-select: none;
+    }
+    #ui {
+      width: 480px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+      font-size: 18px;
+      font-weight: bold;
+    }
+    #muteBtn {
+      background: #0f3460;
+      color: #fff;
+      border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 6px;
+      padding: 4px 10px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    #muteBtn:hover { background: #1a4b8c; }
+    canvas {
+      background: #16213e;
+      border: 4px solid #0f3460;
+      border-radius: 8px;
+      cursor: crosshair;
+    }
+    .warning { color: #ff4d4d; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <span>Pontos: <span id="score">0</span></span>
+    <span>Descida em: <span id="shotsLeft">5</span> tiros</span>
+    <button id="muteBtn">🔊 Som: ON</button>
+  </div>
+  <canvas id="game" width="480" height="640"></canvas>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const shotsLeftEl = document.getElementById('shotsLeft');
+const muteBtn = document.getElementById('muteBtn');
+
+// --- SISTEMA DE ÁUDIO (Web Audio API) ---
+let audioCtx = null;
+let isMuted = false;
+
+function initAudio() {
+  if (!audioCtx) {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+}
+
+muteBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  isMuted = !isMuted;
+  muteBtn.textContent = isMuted ? '🔇 Som: OFF' : '🔊 Som: ON';
+});
+
+function playTone(freq, type, duration, delay = 0, vol = 0.15, slideTo = null) {
+  if (isMuted) return;
+  initAudio();
+
+  const startTime = audioCtx.currentTime + delay;
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+
+  osc.type = type;
+  osc.frequency.setValueAtTime(freq, startTime);
+  if (slideTo) {
+    osc.frequency.exponentialRampToValueAtTime(slideTo, startTime + duration);
+  }
+
+  gain.gain.setValueAtTime(vol, startTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+
+  osc.start(startTime);
+  osc.stop(startTime + duration);
+}
+
+const SFX = {
+  shoot() {
+    playTone(260, 'sine', 0.12, 0, 0.15, 520);
+  },
+  bounce() {
+    playTone(440, 'triangle', 0.06, 0, 0.1, 320);
+  },
+  snap() {
+    playTone(150, 'sine', 0.09, 0, 0.18, 90);
+  },
+  pop(count) {
+    // Toca uma bolha estourando em sequência com tom crescente
+    const notes = Math.min(count, 8);
+    for (let i = 0; i < notes; i++) {
+      const freq = 420 + i * 75;
+      playTone(freq, 'sine', 0.11, i * 0.045, 0.18, freq * 1.35);
+    }
+  },
+  drop(count) {
+    // Cascata aguda para bolhas soltas caindo
+    const notes = Math.min(count, 6);
+    for (let i = 0; i < notes; i++) {
+      playTone(700 + i * 110, 'triangle', 0.14, 0.15 + i * 0.05, 0.12, 350);
+    }
+  },
+  ceilingDown() {
+    playTone(140, 'sawtooth', 0.22, 0, 0.14, 75);
+  },
+  gameOver() {
+    const notes = [330, 294, 262, 196];
+    notes.forEach((freq, i) => {
+      playTone(freq, 'sawtooth', 0.28, i * 0.22, 0.15, freq * 0.9);
+    });
+  }
+};
+// ----------------------------------------
+
+const ROWS = 14;
+const COLS = 11;
+const DANGER_ROW = ROWS - 2;
+const RADIUS = 20;
+const DIAMETER = RADIUS * 2;
+const ROW_HEIGHT = RADIUS * Math.sqrt(3);
+const COLORS = ['#ff4d4d', '#4dff88', '#4da6ff', '#ffd11a', '#b84dff'];
+const MAX_MISSES = 5;
+
+const LEFT_WALL = RADIUS + 20;
+const RIGHT_WALL = canvas.width - RADIUS - 20;
+const TOP_WALL = RADIUS + 10;
+
+let grid = [];
+let ceilingParity = 0;
+let score = 0;
+let misses = 0;
+let gameOver = false;
+let aimAngle = -Math.PI / 2;
+let bullet = null;
+let currentColor = randomColor();
+let nextColor = randomColor();
+
+function randomColor() {
+  return COLORS[Math.floor(Math.random() * COLORS.length)];
+}
+
+function isRowShifted(r) {
+  return (r + ceilingParity) % 2 === 1;
+}
+
+function updateUI() {
+  scoreEl.textContent = score;
+  const remaining = MAX_MISSES - misses;
+  shotsLeftEl.textContent = remaining;
+  shotsLeftEl.className = remaining <= 2 ? 'warning' : '';
+}
+
+function initGrid() {
+  ceilingParity = 0;
+  grid = Array.from({ length: ROWS }, (_, r) =>
+    Array.from({ length: COLS - (isRowShifted(r) ? 1 : 0) }, (_, c) =>
+      r < 5 ? randomColor() : null
+    )
+  );
+  score = 0;
+  misses = 0;
+  gameOver = false;
+  bullet = null;
+  currentColor = randomColor();
+  nextColor = randomColor();
+  updateUI();
+}
+
+function getTilePos(r, c) {
+  const offset = isRowShifted(r) ? RADIUS : 0;
+  const x = c * DIAMETER + RADIUS + offset + 20;
+  const y = r * ROW_HEIGHT + RADIUS + 10;
+  return { x, y };
+}
+
+function getNeighbors(r, c) {
+  const shifted = isRowShifted(r);
+  const dirs = shifted
+    ? [[-1, 0], [-1, 1], [0, -1], [0, 1], [1, 0], [1, 1]]
+    : [[-1, -1], [-1, 0], [0, -1], [0, 1], [1, -1], [1, 0]];
+
+  return dirs
+    .map(([dr, dc]) => [r + dr, c + dc])
+    .filter(([nr, nc]) => nr >= 0 && nr < ROWS && nc >= 0 && nc < grid[nr].length);
+}
+
+function pushCeilingDown() {
+  ceilingParity = (ceilingParity + 1) % 2;
+
+  for (let r = ROWS - 1; r > 0; r--) {
+    grid[r] = grid[r - 1];
+  }
+
+  const newTopLength = COLS - (isRowShifted(0) ? 1 : 0);
+  grid[0] = Array.from({ length: newTopLength }, () => randomColor());
+
+  SFX.ceilingDown();
+  dropFloatingBubbles();
+}
+
+function checkGameOver() {
+  for (let r = DANGER_ROW; r < ROWS; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (grid[r][c] !== null) {
+        if (!gameOver) {
+          gameOver = true;
+          SFX.gameOver();
+        }
+        return;
+      }
+    }
+  }
+}
+
+function snapBullet() {
+  let bestDist = Infinity;
+  let bestCell = null;
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (!grid[r][c]) {
+        const pos = getTilePos(r, c);
+        const dist = Math.hypot(bullet.x - pos.x, bullet.y - pos.y);
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestCell = { r, c };
+        }
+      }
+    }
+  }
+
+  if (bestCell) {
+    grid[bestCell.r][bestCell.c] = bullet.color;
+    const popped = resolveMatches(bestCell.r, bestCell.c);
+
+    if (!popped) {
+      SFX.snap();
+      misses++;
+      if (misses >= MAX_MISSES) {
+        pushCeilingDown();
+        misses = 0;
+      }
+    }
+    checkGameOver();
+    updateUI();
+  }
+
+  bullet = null;
+  currentColor = nextColor;
+  nextColor = randomColor();
+}
+
+function resolveMatches(startR, startC) {
+  const targetColor = grid[startR][startC];
+  const visited = new Set([`${startR},${startC}`]);
+  const queue = [[startR, startC]];
+  const cluster = [];
+
+  while (queue.length > 0) {
+    const [r, c] = queue.shift();
+    cluster.push([r, c]);
+    for (const [nr, nc] of getNeighbors(r, c)) {
+      const key = `${nr},${nc}`;
+      if (!visited.has(key) && grid[nr][nc] === targetColor) {
+        visited.add(key);
+        queue.push([nr, nc]);
+      }
+    }
+  }
+
+  if (cluster.length >= 3) {
+    cluster.forEach(([r, c]) => (grid[r][c] = null));
+    score += cluster.length * 10;
+    SFX.pop(cluster.length);
+    dropFloatingBubbles();
+    return true;
+  }
+  return false;
+}
+
+function dropFloatingBubbles() {
+  const connected = new Set();
+  const queue = [];
+
+  for (let c = 0; c < grid[0].length; c++) {
+    if (grid[0][c]) {
+      connected.add(`0,${c}`);
+      queue.push([0, c]);
+    }
+  }
+
+  while (queue.length > 0) {
+    const [r, c] = queue.shift();
+    for (const [nr, nc] of getNeighbors(r, c)) {
+      const key = `${nr},${nc}`;
+      if (!connected.has(key) && grid[nr][nc]) {
+        connected.add(key);
+        queue.push([nr, nc]);
+      }
+    }
+  }
+
+  let droppedCount = 0;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (grid[r][c] && !connected.has(`${r},${c}`)) {
+        grid[r][c] = null;
+        score += 20;
+        droppedCount++;
+      }
+    }
+  }
+
+  if (droppedCount > 0) {
+    SFX.drop(droppedCount);
+  }
+}
+
+function hitsExistingBubble(x, y) {
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (grid[r][c]) {
+        const pos = getTilePos(r, c);
+        if (Math.hypot(x - pos.x, y - pos.y) <= DIAMETER - 1) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+function drawAimLine(startX, startY) {
+  let simX = startX;
+  let simY = startY;
+  const step = 2;
+  let vx = Math.cos(aimAngle) * step;
+  let vy = Math.sin(aimAngle) * step;
+
+  ctx.beginPath();
+  ctx.moveTo(simX, simY);
+
+  for (let i = 0; i < 800; i++) {
+    simX += vx;
+    simY += vy;
+
+    if (simX <= LEFT_WALL) {
+      simX = LEFT_WALL;
+      vx *= -1;
+      ctx.lineTo(simX, simY);
+    } else if (simX >= RIGHT_WALL) {
+      simX = RIGHT_WALL;
+      vx *= -1;
+      ctx.lineTo(simX, simY);
+    }
+
+    if (simY <= TOP_WALL || hitsExistingBubble(simX, simY)) {
+      ctx.lineTo(simX, simY);
+      break;
+    }
+  }
+
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.75)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 6]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.lineWidth = 1;
+
+  ctx.beginPath();
+  ctx.arc(simX, simY, RADIUS - 1, 0, Math.PI * 2);
+  ctx.strokeStyle = currentColor;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.lineWidth = 1;
+}
+
+canvas.addEventListener('mousemove', (e) => {
+  if (gameOver) return;
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+  const angle = Math.atan2(my - (canvas.height - 40), mx - canvas.width / 2);
+  aimAngle = Math.max(-Math.PI + 0.18, Math.min(-0.18, angle));
+});
+
+canvas.addEventListener('click', () => {
+  initAudio();
+  if (gameOver) {
+    initGrid();
+    return;
+  }
+  if (bullet) return;
+
+  SFX.shoot();
+  const speed = 12;
+  bullet = {
+    x: canvas.width / 2,
+    y: canvas.height - 40,
+    vx: Math.cos(aimAngle) * speed,
+    vy: Math.sin(aimAngle) * speed,
+    color: currentColor
+  };
+});
+
+function update() {
+  if (gameOver || !bullet) return;
+
+  const subSteps = 4;
+  const stepVx = bullet.vx / subSteps;
+  const stepVy = bullet.vy / subSteps;
+
+  for (let s = 0; s < subSteps; s++) {
+    bullet.x += stepVx;
+    bullet.y += stepVy;
+
+    if (bullet.x <= LEFT_WALL) {
+      bullet.x = LEFT_WALL;
+      bullet.vx *= -1;
+      SFX.bounce();
+      break;
+    } else if (bullet.x >= RIGHT_WALL) {
+      bullet.x = RIGHT_WALL;
+      bullet.vx *= -1;
+      SFX.bounce();
+      break;
+    }
+
+    if (bullet.y <= TOP_WALL || hitsExistingBubble(bullet.x, bullet.y)) {
+      snapBullet();
+      return;
+    }
+  }
+}
+
+function drawBubble(x, y, color) {
+  ctx.beginPath();
+  ctx.arc(x, y, RADIUS - 1, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.stroke();
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+  ctx.strokeRect(20, 10, canvas.width - 40, canvas.height - 20);
+
+  const dangerY = DANGER_ROW * ROW_HEIGHT + 10;
+  ctx.beginPath();
+  ctx.moveTo(20, dangerY);
+  ctx.lineTo(canvas.width - 20, dangerY);
+  ctx.strokeStyle = 'rgba(255, 77, 77, 0.5)';
+  ctx.lineWidth = 2;
+  ctx.setLineDash([8, 6]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.lineWidth = 1;
+
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < grid[r].length; c++) {
+      if (grid[r][c]) {
+        const { x, y } = getTilePos(r, c);
+        drawBubble(x, y, grid[r][c]);
+      }
+    }
+  }
+
+  const sx = canvas.width / 2;
+  const sy = canvas.height - 40;
+
+  if (!gameOver && !bullet) {
+    drawAimLine(sx, sy);
+  }
+
+  drawBubble(sx, sy, currentColor);
+  drawBubble(sx - 60, sy + 10, nextColor);
+
+  if (bullet) drawBubble(bullet.x, bullet.y, bullet.color);
+
+  if (gameOver) {
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#ff4d4d';
+    ctx.font = 'bold 42px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('FIM DE JOGO', canvas.width / 2, canvas.height / 2 - 20);
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '20px sans-serif';
+    ctx.fillText(`Pontuação Final: ${score}`, canvas.width / 2, canvas.height / 2 + 25);
+
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '16px sans-serif';
+    ctx.fillText('Clique na tela para jogar novamente', canvas.width / 2, canvas.height / 2 + 65);
+  }
+
+  update();
+  requestAnimationFrame(draw);
+}
+
+initGrid();
+draw();
+</script>
+</body>
+</html>
