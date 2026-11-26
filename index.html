@@ -2,27 +2,36 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Boom Bolhas</title>
   <style>
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+    }
     body {
       margin: 0;
+      padding: 10px;
       background: #1a1a2e;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      height: 100vh;
+      min-height: 100vh;
       color: #fff;
       font-family: sans-serif;
       user-select: none;
+      overflow: hidden;
+      touch-action: none;
     }
     #ui {
-      width: 480px;
+      width: 100%;
+      max-width: 480px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 10px;
-      font-size: 16px;
+      margin-bottom: 8px;
+      font-size: 15px;
       font-weight: bold;
     }
     #muteBtn {
@@ -30,16 +39,21 @@
       color: #fff;
       border: 1px solid rgba(255,255,255,0.2);
       border-radius: 6px;
-      padding: 4px 10px;
+      padding: 6px 10px;
       cursor: pointer;
       font-size: 13px;
     }
     #muteBtn:hover { background: #1a4b8c; }
     canvas {
+      width: 100%;
+      max-width: 480px;
+      max-height: calc(100vh - 65px);
+      aspect-ratio: 480 / 640;
       background: #16213e;
       border: 4px solid #0f3460;
       border-radius: 8px;
       cursor: crosshair;
+      touch-action: none;
     }
     .warning { color: #ff4d4d; }
     .level-badge { color: #4dff88; }
@@ -170,8 +184,8 @@ let aimAngle = -Math.PI / 2;
 let bullet = null;
 let currentColor = null;
 let nextColor = null;
+let isTouching = false;
 
-// Define parâmetros de dificuldade baseados na fase atual
 function getLevelConfig(lvl) {
   const colorCount = Math.min(4 + Math.floor((lvl - 1) / 1), ALL_COLORS.length);
   const allowedMisses = Math.max(3, 5 - Math.floor((lvl - 1) / 2));
@@ -187,7 +201,6 @@ function randomBoardColor() {
   return activeColors[Math.floor(Math.random() * activeColors.length)];
 }
 
-// Sorteia apenas entre as cores que ainda existem na grade (ou das ativas se vazia)
 function randomShooterColor() {
   const present = new Set();
   for (let r = 0; r < ROWS; r++) {
@@ -274,7 +287,7 @@ function checkWin() {
     }
   }
   gameState = 'levelClear';
-  score += level * 250; // Bônus de conclusão de fase
+  score += level * 250;
   SFX.levelWin();
   return true;
 }
@@ -333,7 +346,6 @@ function snapBullet() {
 
   bullet = null;
   if (gameState === 'playing') {
-    // Garante que a munição no canhão ainda exista no tabuleiro
     const present = new Set(grid.flat().filter(Boolean));
     currentColor = present.has(nextColor) ? nextColor : randomShooterColor();
     nextColor = randomShooterColor();
@@ -465,25 +477,30 @@ function drawAimLine(startX, startY) {
   ctx.lineWidth = 1;
 }
 
-canvas.addEventListener('mousemove', (e) => {
+// --- CONTROLES UNIFICADOS (MOUSE + TOUCH) ---
+function updateAimFromClientPos(clientX, clientY) {
   if (gameState !== 'playing') return;
   const rect = canvas.getBoundingClientRect();
-  const mx = e.clientX - rect.left;
-  const my = e.clientY - rect.top;
+  // Converte coordenadas da tela responsiva para a resolução interna 480x640
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const mx = (clientX - rect.left) * scaleX;
+  const my = (clientY - rect.top) * scaleY;
+
   const angle = Math.atan2(my - (canvas.height - 40), mx - canvas.width / 2);
   aimAngle = Math.max(-Math.PI + 0.18, Math.min(-0.18, angle));
-});
+}
 
-canvas.addEventListener('click', () => {
+function handleActionTrigger() {
   initAudio();
 
   if (gameState === 'gameOver') {
-    startLevel(1, true); // Volta para a Fase 1 zerando pontos
+    startLevel(1, true);
     return;
   }
 
   if (gameState === 'levelClear') {
-    startLevel(level + 1, false); // Avança para a próxima fase mantendo pontos
+    startLevel(level + 1, false);
     return;
   }
 
@@ -498,7 +515,43 @@ canvas.addEventListener('click', () => {
     vy: Math.sin(aimAngle) * speed,
     color: currentColor
   };
+}
+
+// Eventos de Mouse (Desktop)
+canvas.addEventListener('mousemove', (e) => {
+  if (isTouching) return;
+  updateAimFromClientPos(e.clientX, e.clientY);
 });
+
+canvas.addEventListener('click', (e) => {
+  if (isTouching) return;
+  updateAimFromClientPos(e.clientX, e.clientY);
+  handleActionTrigger();
+});
+
+// Eventos de Toque (Celular / Tablet)
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  isTouching = true;
+  initAudio();
+  const touch = e.touches[0];
+  updateAimFromClientPos(touch.clientX, touch.clientY);
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (!isTouching) return;
+  const touch = e.touches[0];
+  updateAimFromClientPos(touch.clientX, touch.clientY);
+}, { passive: false });
+
+canvas.addEventListener('touchend', (e) => {
+  e.preventDefault();
+  if (!isTouching) return;
+  handleActionTrigger();
+  setTimeout(() => { isTouching = false; }, 100);
+}, { passive: false });
+// --------------------------------------------
 
 function update() {
   if (gameState !== 'playing' || !bullet) return;
@@ -544,7 +597,7 @@ function drawOverlay(title, titleColor, subtitle, detail, actionText) {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
   ctx.fillStyle = titleColor;
-  ctx.font = 'bold 40px sans-serif';
+  ctx.font = 'bold 38px sans-serif';
   ctx.textAlign = 'center';
   ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 45);
 
@@ -554,7 +607,7 @@ function drawOverlay(title, titleColor, subtitle, detail, actionText) {
 
   if (detail) {
     ctx.fillStyle = '#ffd11a';
-    ctx.font = '16px sans-serif';
+    ctx.font = '15px sans-serif';
     ctx.fillText(detail, canvas.width / 2, canvas.height / 2 + 40);
   }
 
@@ -601,7 +654,6 @@ function draw() {
 
   if (bullet) drawBubble(bullet.x, bullet.y, bullet.color);
 
-  // Telas de transição
   if (gameState === 'levelClear') {
     const nextCfg = getLevelConfig(level + 1);
     drawOverlay(
@@ -609,7 +661,7 @@ function draw() {
       '#4dff88',
       `Pontuação Total: ${score} (+${level * 250} bônus)`,
       `Próxima fase: ${nextCfg.colors.length} cores | Descida a cada ${nextCfg.maxMisses} erros`,
-      'Clique na tela para iniciar a próxima fase'
+      'Toque ou clique para iniciar a próxima fase'
     );
   } else if (gameState === 'gameOver') {
     drawOverlay(
@@ -617,7 +669,7 @@ function draw() {
       '#ff4d4d',
       `Você chegou até a Fase ${level}`,
       `Pontuação Final: ${score}`,
-      'Clique na tela para reiniciar da Fase 1'
+      'Toque ou clique para reiniciar da Fase 1'
     );
   }
 
